@@ -30,7 +30,7 @@
     <button data-page="library" title="Arquivos"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 7V4h7l2 3h9v13H3z"/></svg><span>Biblioteca</span></button>
     <button data-page="guide" title="Ajuda"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"/><path d="M9 9a3 3 0 0 1 6 0c0 2-3 2-3 5M12 18h.01"/></svg><span>Ajuda</span></button>
   </nav>
-  <div class="sidebar-foot"><strong><span class="footdot"></span> Estúdio local</strong>Leitor/editor MIDI local. Links de vídeo são processados no seu servidor online.<br><br><b>v1.3 • Sites via nuvem → MP3</b></div>
+  <div class="sidebar-foot"><strong><span class="footdot"></span> Estúdio local</strong>Leitor/editor MIDI local. Links de vídeo são processados no seu servidor online.<br><br><b>v1.4 • YouTube: modo alternativo</b></div>
 </aside><main class="main">
 <header class="top"><div class="crumb">BlueNote <span style="color:#b6c0d0">/</span> <b id="breadcrumb">Visão geral</b></div><div class="top-right"><div class="top-chip"><span class="footdot"></span> Processamento local</div><div class="avatar">♫</div></div></header>
 <section class="page active" id="page-home">
@@ -87,7 +87,7 @@
     <div class="panel"><div class="card-title"><h2>02. O que é suportado?</h2></div>
       <div class="mp3-features"><div class="mp3-feature"><strong>✓ Sites compatíveis</strong><span>YouTube, Vimeo, TikTok, SoundCloud e outros sites listados, via serviço online configurado. Alguns links podem falhar.</span></div><div class="mp3-feature"><strong>✓ URL .mp3</strong><span>Salva o arquivo original sem recodificar.</span></div><div class="mp3-feature"><strong>✓ URL .wav / .m4a</strong><span>Converte quando o navegador decodifica o áudio.</span></div><div class="mp3-feature"><strong>✓ URL .mp4</strong><span>Extrai áudio se o Chrome conseguir abrir a faixa sonora do vídeo.</span></div><div class="mp3-feature"><strong>✓ Arquivo local</strong><span>MP3, WAV, M4A e formatos compatíveis.</span></div></div>
       <div class="notice warn"><b>Direitos e compatibilidade:</b> baixe apenas materiais próprios, licenciados ou cuja extração seja autorizada. O funcionamento depende das regras e mudanças de cada site. Serviços com DRM, conteúdo privado ou que exigem autenticação não são suportados; streaming protegido (ex.: Spotify) não é extraído.</div>
-      <div class="notice"><b>Como funciona:</b> páginas de vídeo precisam de internet e do <b>servidor online configurado</b>. A URL e o áudio serão processados nessa hospedagem, não somente no seu aparelho. Não é necessário Termux. Links MP3 diretos dependem de CORS; outras recodificações no navegador usam <i>lamejs</i> externo. O leitor/editor MIDI permanece offline.</div>
+      <div class="notice"><b>Compatibilidade com YouTube:</b> duas opções de reprodução são tentadas quando há falha de player. A exigência anti-bot associada ao IP do Render pode continuar. Não informe cookies ou senha do YouTube no aplicativo.<br><br><b>Como funciona:</b> páginas de vídeo precisam de internet e do <b>servidor online configurado</b>. A URL e o áudio serão processados nessa hospedagem, não somente no seu aparelho. Não é necessário Termux. Links MP3 diretos dependem de CORS; outras recodificações no navegador usam <i>lamejs</i> externo. O leitor/editor MIDI permanece offline.</div>
     </div>
     <div class="panel" style="margin-top:15px"><div class="card-title"><h3>03. Depois de converter</h3></div><p class="hint" style="font-size:12px">O MP3 será salvo em Downloads no Chrome. Para transformar o áudio em notas, carregue o arquivo na função Áudio → MIDI.</p><button class="btn soft full" data-go="convert">♫ Abrir conversor MP3 → MIDI</button></div>
   </div></div>
@@ -207,7 +207,7 @@ async function platformCheck(){let el=$('platformIndicator'),st=$('platformStatu
   r=await fetch(base+'/api/auth',{headers:platformHeaders(),signal:ctl.signal,cache:'no-store'});
   if(!r.ok){if(r.status===401)throw Error('Chave APP_KEY incorreta. Confira se ela é idêntica à definida na hospedagem.');throw Error('HTTP '+r.status)}
   try{localStorage.setItem('bluenote_cloud_url',base);sessionStorage.setItem('bluenote_cloud_key',cloudKey.value)}catch{}
-  el.textContent='● Servidor conectado';el.className='platform-indicator connected';st.textContent='Conectado por HTTPS, com yt-dlp, FFmpeg e Deno. Agora você pode converter links de vídeos públicos autorizados.';return true;
+  el.textContent='● Servidor conectado';el.className='platform-indicator connected';st.textContent='Conectado por HTTPS, com yt-dlp, FFmpeg e Deno. O servidor testa uma alternativa de reprodução quando o YouTube bloqueia a primeira tentativa; bloqueios anti-bot do IP podem persistir.';return true;
 }catch(e){el.textContent='○ Não conectado';el.className='platform-indicator waiting';st.textContent=(e.name==='AbortError'?'Servidor demorou para iniciar. Espere 1 minuto e tente novamente.':e.message+' Configure seu servidor no guia abaixo.');return false;}finally{if(id)clearTimeout(id)} }
 $('platformCheckBtn').onclick=platformCheck;
 async function platformDownload(id, filename, signal){

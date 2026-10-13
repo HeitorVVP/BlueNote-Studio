@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""BlueNote Studio 1.3: servidor web de uso pessoal para converter links públicos em MP3.
+"""BlueNote Studio 1.4: servidor web de uso pessoal para converter links públicos em MP3.
 Requer APP_KEY forte, yt-dlp[default], FFmpeg e Deno. Inclui controles básicos
 para exposição à internet; uso pessoal/autorizado apenas.
 """
@@ -24,7 +24,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = pathlib.Path(__file__).resolve().parent
-STORE = pathlib.Path(tempfile.gettempdir()) / 'bluenote_cloud_v13'
+STORE = pathlib.Path(tempfile.gettempdir()) / 'bluenote_cloud_v14'
 STORE.mkdir(parents=True, exist_ok=True)
 PORT = int(os.environ.get('PORT', '10000'))
 KEY = os.environ.get('APP_KEY', '').strip()
@@ -83,8 +83,9 @@ def explain_yt_error(lines, code):
     """Mapeia erros comuns sem expor URLs, cookies ou saída bruta do yt-dlp."""
     detail = '\n'.join(lines).lower()
     if any(term in detail for term in ('sign in to confirm', 'not a bot', 'automated queries', 'unusual traffic')):
-        return ('O YouTube solicitou verificação anti-bot para o servidor Render. '
-                'A conexão e a senha estão corretas; este bloqueio é do site de origem.')
+        return ('O YouTube pediu verificação anti-bot para o IP do servidor. '
+                'Dois métodos de reprodução foram tentados quando possível. '
+                'Esse bloqueio do YouTube pode continuar mesmo com o yt-dlp atualizado.')
     if 'http error 429' in detail or 'too many requests' in detail:
         return 'O site limitou as solicitações do servidor (HTTP 429). Tente mais tarde.'
     if 'http error 403' in detail or 'forbidden' in detail:
@@ -117,78 +118,142 @@ def explain_yt_error(lines, code):
     return 'O site não entregou um MP3 válido. Confira os logs do Render.'
 
 
+def is_youtube(url):
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or '').lower().rstrip('.')
+    except ValueError:
+        return False
+    return any(host == domain or host.endswith('.' + domain)
+               for domain in ('youtube.com', 'youtu.be', 'youtube-nocookie.com'))
+
+
+def youtube_retry_allowed(lines):
+    """Only one alternative attempt for likely YouTube playback/client problems."""
+    msg = '\n'.join(lines).lower()
+    indicators = ('not a bot', 'sign in to confirm', 'automated queries',
+                  'http error 403', 'requested format is not available',
+                  'no video formats found', 'no formats found',
+                  'signature solving failed', 'challenge solving failed',
+                  'js challenge', 'missing a url', 'unable to extract')
+    return any(word in msg for word in indicators)
+
+
+def build_command(job, folder, alternative=False):
+    """Official yt-dlp CLI, kept isolated from user-controlled shell commands."""
+    cmd = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-playlist',
+           '--newline', '--no-overwrites', '--socket-timeout', '18',
+           '--force-ipv4', '--sleep-requests', '0.6',
+           '--retries', '2', '--fragment-retries', '2', '--extractor-retries', '1',
+           '--max-filesize', '85M',
+           '--match-filter', f'duration <= {MAX_LENGTH} & !is_live',
+           '--restrict-filenames', '--no-write-thumbnail',
+           '--no-write-info-json', '--no-write-comments',
+           '-f', 'bestaudio/best', '-x', '--audio-format', 'mp3',
+           '--audio-quality', f"{job['quality']}K",
+           '--print', 'after_move:BLUENOTE_TITLE:%(title)s',
+           '-o', str(folder / 'audio.%(ext)s')]
+    if is_youtube(job['url']):
+        cmd.extend(['--js-runtimes', 'deno'])
+        if alternative:
+            # A fallback client selection recommended by yt-dlp's public docs;
+            # it does NOT defeat IP/session-based verification requirements.
+            cmd.extend(['--extractor-args',
+                        'youtube:player_client=web_safari,android_vr',
+                        '--remote-components', 'ejs:npm'])
+    cmd.extend(['--', job['url']])
+    return cmd
+
+
 def run_job(job):
     folder = STORE / job['id']
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
-    cmd = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-playlist',
-           '--no-warnings', '--newline', '--no-overwrites', '--socket-timeout', '18',
-           '--retries', '2', '--fragment-retries', '2', '--max-filesize', '85M',
-           '--match-filter', f'duration <= {MAX_LENGTH} & !is_live', '--restrict-filenames',
-           '--no-write-thumbnail', '--no-write-info-json', '--no-write-comments',
-           '-f', 'bestaudio/best', '-x', '--audio-format', 'mp3',
-           '--audio-quality', f"{job['quality']}K", '--print',
-           'after_move:BLUENOTE_TITLE:%(title)s',
-           '-o', str(folder / 'audio.%(ext)s'), '--', job['url']]
+    yt = is_youtube(job['url'])
     proc = None
+    last_lines = []
+    last_code = 1
     try:
         with LOCK:
             if job['cancelled']:
                 job.update(status='cancelled', message='Cancelado.')
                 return
             job.update(status='working', message='Conectando ao site…', progress=3)
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, encoding='utf-8', errors='replace', bufsize=1,
-                                start_new_session=(os.name != 'nt'))
-        with LOCK:
-            job['proc'] = proc
-        lines = []
-        for line in iter(proc.stdout.readline, ''):
-            line = line.strip()
-            if not line:
-                continue
-            lines = (lines + [line])[-30:]
-            if line.startswith('BLUENOTE_TITLE:'):
-                with LOCK:
-                    job['title'] = line.split(':', 1)[1].strip()[:120]
-            match = re.search(r'\[download\]\s+([\d.,]+)%', line)
-            if match:
-                try:
-                    p = float(match.group(1).replace(',', '.'))
-                    with LOCK:
-                        job.update(progress=min(88, round(5 + .80 * p)), message='Baixando áudio…')
-                except ValueError:
-                    pass
-            elif 'ExtractAudio' in line or 'Deleting original file' in line:
-                with LOCK:
-                    job.update(progress=92, message='Convertendo com FFmpeg…')
-            if job['cancelled'] or (time.time() - job['created'] > 360):
+        # Only attempt a second profile on YouTube and only for relevant playback errors.
+        for attempt in range(2 if yt else 1):
+            if job['cancelled'] or time.time() - job['created'] > 360:
                 job['cancelled'] = True
-                proc.terminate()
                 break
-        try:
-            code = proc.wait(timeout=12)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            code = proc.wait()
+            if attempt:
+                # Do not reuse incomplete media downloaded by the first attempt.
+                for file in folder.iterdir():
+                    if file.is_file():
+                        file.unlink(missing_ok=True)
+                with LOCK:
+                    job.update(message='Tentando outro modo de reprodução do YouTube…', progress=8)
+            cmd = build_command(job, folder, alternative=bool(attempt))
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, encoding='utf-8', errors='replace', bufsize=1,
+                                    start_new_session=(os.name != 'nt'))
+            with LOCK:
+                job['proc'] = proc
+            lines = []
+            assert proc.stdout is not None
+            for line in iter(proc.stdout.readline, ''):
+                line = line.strip()
+                if not line:
+                    continue
+                lines = (lines + [line])[-55:]
+                if line.startswith('BLUENOTE_TITLE:'):
+                    with LOCK:
+                        job['title'] = line.split(':', 1)[1].strip()[:120]
+                match = re.search(r'\[download\]\s+([\d.,]+)%', line)
+                if match:
+                    try:
+                        percent = float(match.group(1).replace(',', '.'))
+                        with LOCK:
+                            job.update(progress=min(88, round(8 + .8 * percent)),
+                                       message='Baixando áudio…')
+                    except ValueError:
+                        pass
+                elif 'ExtractAudio' in line or 'Deleting original file' in line:
+                    with LOCK:
+                        job.update(progress=92, message='Convertendo com FFmpeg…')
+                if job['cancelled'] or time.time() - job['created'] > 360:
+                    job['cancelled'] = True
+                    proc.terminate()
+                    break
+            try:
+                last_code = proc.wait(timeout=12)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                last_code = proc.wait()
+            last_lines = lines
+            if job['cancelled']:
+                break
+            mp3_files = list(folder.glob('*.mp3'))
+            if last_code == 0 and mp3_files:
+                output = max(mp3_files, key=lambda file: file.stat().st_size)
+                if output.stat().st_size > MAX_BYTES:
+                    raise RuntimeError('O arquivo ultrapassou 85 MB.')
+                with LOCK:
+                    job.update(status='ready', progress=100, message='MP3 pronto!',
+                               path=str(output),
+                               filename=(job.get('title') or 'Audio')[:120] + '.mp3')
+                return
+            # Avoid repeated requests unless this is a Youtube playback/client error.
+            if not (yt and attempt == 0 and youtube_retry_allowed(lines)):
+                break
         if job['cancelled']:
             with LOCK:
-                job.update(status='cancelled', progress=0, message='Cancelado ou excedeu o tempo máximo.')
+                job.update(status='cancelled', progress=0,
+                           message='Cancelado ou excedeu o tempo máximo.')
             return
-        files = list(folder.glob('*.mp3'))
-        if code or not files:
-            # Não exibir URLs, dados privados ou saída bruta do extrator.
-            reason = explain_yt_error(lines, code)
-            print('[BlueNote] Extração falhou: ' + reason, flush=True)
-            raise RuntimeError(reason)
-        output = max(files, key=lambda p: p.stat().st_size)
-        if output.stat().st_size > MAX_BYTES:
-            raise RuntimeError('O arquivo ultrapassou 85 MB.')
-        with LOCK:
-            job.update(status='ready', progress=100, message='MP3 pronto!', path=str(output),
-                       filename=(job.get('title') or 'Audio')[:120] + '.mp3')
+        reason = explain_yt_error(last_lines, last_code)
+        print('[BlueNote] Extração: ' + reason, flush=True)
+        raise RuntimeError(reason)
     except Exception as exc:
         with LOCK:
-            job.update(status='error', error=str(exc)[:250], message='Não foi possível concluir.')
+            job.update(status='error', error=str(exc)[:350],
+                       message='Não foi possível concluir.')
     finally:
         with LOCK:
             job.pop('proc', None)
@@ -197,7 +262,7 @@ def run_job(job):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'BlueNoteCloud/1.3'
+    server_version = 'BlueNoteCloud/1.4'
     def log_message(self, fmt, *args):
         # Omit URLs, referrers and keys from provider logs.
         return
@@ -239,10 +304,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == '/api/health':
             return self.respond(200, {
-                'ok': True, 'version': '1.3', 'requires_key': True,
+                'ok': True, 'version': '1.4', 'requires_key': True,
                 'configured': len(KEY) >= 16, 'yt_dlp': self.has_ytdlp(),
                 'ffmpeg': bool(shutil.which('ffmpeg')),
                 'js_runtime': 'deno' if shutil.which('deno') else None,
+                'yt_dlp_version': self.ytdlp_version(),
+                'youtube_fallback': True,
             })
         if not path.startswith('/api/'):
             return self.respond(404, {'error': 'Página não encontrada.'})
@@ -277,6 +344,13 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             return
         return self.respond(404, {'error': 'Rota desconhecida.'})
+
+    def ytdlp_version(self):
+        try:
+            from yt_dlp.version import __version__
+            return __version__
+        except ImportError:
+            return None
 
     def has_ytdlp(self):
         try:
@@ -346,7 +420,7 @@ if __name__ == '__main__':
     if len(KEY) < 16:
         print('ERRO: defina APP_KEY (senha forte, pelo menos 16 caracteres) nas variáveis do serviço.', flush=True)
         sys.exit(2)
-    print(f'BlueNote online v1.3 em 0.0.0.0:{PORT}, com autenticação.', flush=True)
+    print(f'BlueNote online v1.4 em 0.0.0.0:{PORT}, com autenticação.', flush=True)
     server = ThreadingHTTPServer(('0.0.0.0', PORT), Handler)
     try:
         server.serve_forever(poll_interval=0.2)
