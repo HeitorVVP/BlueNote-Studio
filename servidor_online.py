@@ -79,6 +79,44 @@ def gc():
             RECENT.popleft()
 
 
+def explain_yt_error(lines, code):
+    """Mapeia erros comuns sem expor URLs, cookies ou saída bruta do yt-dlp."""
+    detail = '\n'.join(lines).lower()
+    if any(term in detail for term in ('sign in to confirm', 'not a bot', 'automated queries', 'unusual traffic')):
+        return ('O YouTube solicitou verificação anti-bot para o servidor Render. '
+                'A conexão e a senha estão corretas; este bloqueio é do site de origem.')
+    if 'http error 429' in detail or 'too many requests' in detail:
+        return 'O site limitou as solicitações do servidor (HTTP 429). Tente mais tarde.'
+    if 'http error 403' in detail or 'forbidden' in detail:
+        return 'O site bloqueou o acesso ao áudio a partir do servidor (HTTP 403).'
+    if 'http error 401' in detail or 'login required' in detail or 'requires authentication' in detail:
+        return 'Este áudio exige autenticação no site de origem.'
+    if any(term in detail for term in ('private video', 'video is private', 'video unavailable',
+                                       'is unavailable', 'content is not available', 'removed by')):
+        return 'O vídeo está privado, indisponível ou foi removido.'
+    if 'age-restricted' in detail or 'age restricted' in detail:
+        return 'O vídeo tem restrição de idade e não está acessível ao servidor.'
+    if 'unsupported url' in detail or 'no suitable extractor' in detail:
+        return 'O link não é reconhecido pelo extrator de áudio.'
+    if any(term in detail for term in ('requested format is not available', 'no video formats found',
+                                       'only images are available', 'no formats found')):
+        return ('O site não entregou um formato de áudio compatível. '
+                'Pode ser uma restrição do vídeo ou uma mudança no player do YouTube.')
+    if any(term in detail for term in ('challenge solving failed', 'js challenge', 'javascript runtime',
+                                       'ejs', 'signature solving failed')):
+        return 'A verificação JavaScript do YouTube falhou. Confira se yt-dlp e Deno estão atualizados.'
+    if 'unable to download webpage' in detail or 'timed out' in detail or 'name or service not known' in detail:
+        return 'O servidor não conseguiu acessar o site a tempo. Verifique a disponibilidade e tente novamente.'
+    if 'ffmpeg' in detail or 'postprocessing' in detail:
+        return 'O arquivo foi encontrado, mas houve uma falha na conversão com FFmpeg.'
+    if 'does not pass filter' in detail or 'does not pass' in detail:
+        return 'O vídeo ultrapassa o limite de 30 minutos ou não atende aos critérios deste servidor.'
+    if code:
+        return ('Falha na extração pelo yt-dlp (código %s). '
+                'Confira os logs do Render ou tente outro vídeo permitido.' % code)
+    return 'O site não entregou um MP3 válido. Confira os logs do Render.'
+
+
 def run_job(job):
     folder = STORE / job['id']
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -108,7 +146,7 @@ def run_job(job):
             line = line.strip()
             if not line:
                 continue
-            lines = (lines + [line])[-7:]
+            lines = (lines + [line])[-30:]
             if line.startswith('BLUENOTE_TITLE:'):
                 with LOCK:
                     job['title'] = line.split(':', 1)[1].strip()[:120]
@@ -138,8 +176,10 @@ def run_job(job):
             return
         files = list(folder.glob('*.mp3'))
         if code or not files:
-            # Do not leak stdout logs or remote URL in errors to browsers.
-            raise RuntimeError('O site recusou ou não disponibilizou este áudio. Tente outro vídeo público.')
+            # Não exibir URLs, dados privados ou saída bruta do extrator.
+            reason = explain_yt_error(lines, code)
+            print('[BlueNote] Extração falhou: ' + reason, flush=True)
+            raise RuntimeError(reason)
         output = max(files, key=lambda p: p.stat().st_size)
         if output.stat().st_size > MAX_BYTES:
             raise RuntimeError('O arquivo ultrapassou 85 MB.')
