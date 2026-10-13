@@ -7,7 +7,10 @@ ENV PATH="/opt/bluenote-venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 PORT=10000
 WORKDIR /app
 COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir --upgrade -r requirements.txt \
+    && python -m yt_dlp --version \
+    && deno --version
 COPY index.html servidor_online.py /app/
 EXPOSE 10000
 ENTRYPOINT ["/opt/bluenote-venv/bin/python"]
