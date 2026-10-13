@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: bluenote-studio-online
+    runtime: docker
+    plan: free
+    autoDeployTrigger: commit
+    envVars:
+      - key: APP_KEY
+        sync: false
